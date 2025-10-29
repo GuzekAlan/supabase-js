@@ -8,6 +8,13 @@ var socket = new RealtimeClient(NEXT_PUBLIC_SUPABASE_URL, {
 
 var publicSchema = null
 
+const channelStatusMap = {
+  SUBSCRIBED: 'SUBSCRIBED',
+  CHANNEL_ERROR: 'FAILED',
+  TIMED_OUT: 'Timed out, retrying.',
+  CLOSED: 'UNSUBSCRIBED',
+}
+
 export default function IndexPage() {
   let [inserts, setInserts] = useState([])
   let [updates, setUpdates] = useState([])
@@ -31,11 +38,9 @@ export default function IndexPage() {
     // Channel events
     publicSchema._onError(() => setChannelStatus('ERROR'))
     publicSchema._onClose(() => setChannelStatus('Closed gracefully.'))
-    publicSchema
-      .subscribe()
-      .receive('ok', () => setChannelStatus('SUBSCRIBED'))
-      .receive('error', () => setChannelStatus('FAILED'))
-      .receive('timeout', () => setChannelStatus('Timed out, retrying.'))
+    publicSchema.subscribe((status) => {
+      setChannelStatus(channelStatusMap[status] || 'UNKNOWN')
+    })
   }
 
   const toggleSubscription = () => {
