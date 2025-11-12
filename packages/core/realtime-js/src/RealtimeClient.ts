@@ -1,20 +1,16 @@
 import WebSocketFactory, { WebSocketLike } from './lib/websocket-factory'
 
+import { PhoenixSocket } from './lib/phoenixAdapter'
+
 import {
   CHANNEL_EVENTS,
   CONNECTION_STATE,
   DEFAULT_VERSION,
   DEFAULT_TIMEOUT,
-  SOCKET_STATES,
-  TRANSPORTS,
-  DEFAULT_VSN,
-  VSN_1_0_0,
-  VSN_2_0_0,
   WS_CLOSE_NORMAL,
 } from './lib/constants'
 
-import Serializer from './lib/serializer'
-import Timer from './lib/timer'
+import { Timer } from 'phoenix'
 
 import { httpEndpointURL } from './lib/transformers'
 import RealtimeChannel from './RealtimeChannel'
@@ -43,8 +39,6 @@ export type HeartbeatStatus = 'sent' | 'ok' | 'error' | 'timeout' | 'disconnecte
 
 const noop = () => {}
 
-type RealtimeClientState = 'connecting' | 'connected' | 'disconnecting' | 'disconnected'
-
 // Connection-related constants
 const CONNECTION_TIMEOUTS = {
   HEARTBEAT_INTERVAL: 25000,
@@ -71,14 +65,13 @@ export type RealtimeClientOptions = {
   transport?: WebSocketLikeConstructor
   timeout?: number
   heartbeatIntervalMs?: number
-  heartbeatCallback?: (status: HeartbeatStatus) => void
-  vsn?: string
   logger?: Function
   encode?: Function
   decode?: Function
   reconnectAfterMs?: Function
-  headers?: { [key: string]: string }
   params?: { [key: string]: any }
+
+  headers?: { [key: string]: string }
   //Deprecated: Use it in favour of correct casing `logLevel`
   log_level?: LogLevel
   logLevel?: LogLevel
@@ -86,8 +79,10 @@ export type RealtimeClientOptions = {
   worker?: boolean
   workerUrl?: string
   accessToken?: () => Promise<string | null>
+  heartbeatCallback?: (status: HeartbeatStatus) => void
 }
 
+// TODO: Use WORKER_SCRIPT
 const WORKER_SCRIPT = `
   addEventListener("message", (e) => {
     if (e.data.event === "start") {
@@ -96,10 +91,11 @@ const WORKER_SCRIPT = `
   });`
 
 export default class RealtimeClient {
+  socket: PhoenixSocket
   accessTokenValue: string | null = null
   apiKey: string | null = null
   channels: RealtimeChannel[] = new Array()
-  endPoint: string = ''
+  // endPoint: string = '' // It is done in PhoenixSocket
   httpEndpoint: string = ''
   /** @deprecated headers cannot be set on websocket connections */
   headers?: { [key: string]: string } = {}
@@ -112,32 +108,14 @@ export default class RealtimeClient {
   heartbeatCallback: (status: HeartbeatStatus) => void = noop
   ref: number = 0
   reconnectTimer: Timer | null = null
-  vsn: string = DEFAULT_VSN
-  logger: Function = noop
   logLevel?: LogLevel
-  encode!: Function
-  decode!: Function
   reconnectAfterMs!: Function
-  conn: WebSocketLike | null = null
-  sendBuffer: Function[] = []
-  serializer: Serializer = new Serializer()
-  stateChangeCallbacks: {
-    open: Function[]
-    close: Function[]
-    error: Function[]
-    message: Function[]
-  } = {
-    open: [],
-    close: [],
-    error: [],
-    message: [],
-  }
   fetch: Fetch
   accessToken: (() => Promise<string | null>) | null = null
   worker?: boolean
   workerUrl?: string
   workerRef?: Worker
-  private _connectionState: RealtimeClientState = 'disconnected'
+  // private _connectionState: RealtimeClientState = 'disconnected' // Probably not needed
   private _wasManualDisconnect: boolean = false
   private _authPromise: Promise<void> | null = null
 
@@ -167,29 +145,27 @@ export default class RealtimeClient {
     }
     this.apiKey = options.params.apikey
 
-    // Initialize endpoint URLs
-    this.endPoint = `${endPoint}/${TRANSPORTS.websocket}`
-    this.httpEndpoint = httpEndpointURL(endPoint)
-
     this._initializeOptions(options)
     this._setupReconnectionTimer()
     this.fetch = this._resolveFetch(options?.fetch)
+
+    this.socket = new PhoenixSocket(endPoint, options)
+
+    this.httpEndpoint = httpEndpointURL(this.socket.endPointURL()) // Moved after creating PhoenixSocket
   }
 
   /**
    * Connects the socket, unless already connected.
    */
   connect(): void {
-    // Skip if already connecting, disconnecting, or connected
+    // // Skip if already connecting, disconnecting, or connected
     if (
       this.isConnecting() ||
       this.isDisconnecting() ||
-      (this.conn !== null && this.isConnected())
+      (this.socket && this.socket.isConnected())
     ) {
       return
     }
-
-    this._setConnectionState('connecting')
 
     // Trigger auth if needed and not already in progress
     // This ensures auth is called for standalone RealtimeClient usage
@@ -198,37 +174,7 @@ export default class RealtimeClient {
       this._setAuthSafely('connect')
     }
 
-    // Establish WebSocket connection
-    if (this.transport) {
-      // Use custom transport if provided
-      this.conn = new this.transport(this.endpointURL()) as WebSocketLike
-    } else {
-      // Try to use native WebSocket
-      try {
-        this.conn = WebSocketFactory.createWebSocket(this.endpointURL())
-      } catch (error) {
-        this._setConnectionState('disconnected')
-        const errorMessage = (error as Error).message
-
-        // Provide helpful error message based on environment
-        if (errorMessage.includes('Node.js')) {
-          throw new Error(
-            `${errorMessage}\n\n` +
-              'To use Realtime in Node.js, you need to provide a WebSocket implementation:\n\n' +
-              'Option 1: Use Node.js 22+ which has native WebSocket support\n' +
-              'Option 2: Install and provide the "ws" package:\n\n' +
-              '  npm install ws\n\n' +
-              '  import ws from "ws"\n' +
-              '  const client = new RealtimeClient(url, {\n' +
-              '    ...options,\n' +
-              '    transport: ws\n' +
-              '  })'
-          )
-        }
-        throw new Error(`WebSocket not available: ${errorMessage}`)
-      }
-    }
-    this._setupConnectionHandlers()
+    this.socket.connect()
   }
 
   /**
@@ -236,7 +182,7 @@ export default class RealtimeClient {
    * @returns string The URL of the websocket.
    */
   endpointURL(): string {
-    return this._appendParams(this.endPoint, Object.assign({}, this.params, { vsn: this.vsn }))
+    return this.socket.endPointURL()
   }
 
   /**
@@ -250,32 +196,7 @@ export default class RealtimeClient {
       return
     }
 
-    this._setConnectionState('disconnecting', true)
-
-    if (this.conn) {
-      // Setup fallback timer to prevent hanging in disconnecting state
-      const fallbackTimer = setTimeout(() => {
-        this._setConnectionState('disconnected')
-      }, 100)
-
-      this.conn.onclose = () => {
-        clearTimeout(fallbackTimer)
-        this._setConnectionState('disconnected')
-      }
-
-      // Close the WebSocket connection if close method exists
-      if (typeof this.conn.close === 'function') {
-        if (code) {
-          this.conn.close(code, reason ?? '')
-        } else {
-          this.conn.close()
-        }
-      }
-
-      this._teardownConnection()
-    } else {
-      this._setConnectionState('disconnected')
-    }
+    this.socket.disconnect(code, reason)
   }
 
   /**
@@ -290,6 +211,7 @@ export default class RealtimeClient {
    * @param channel A RealtimeChannel instance
    */
   async removeChannel(channel: RealtimeChannel): Promise<RealtimeRemoveChannelResponse> {
+    // TODO: It might need to use `remove` method from socket
     const status = await channel.unsubscribe()
 
     if (this.channels.length === 0) {
@@ -303,6 +225,7 @@ export default class RealtimeClient {
    * Unsubscribes and removes all channels
    */
   async removeAllChannels(): Promise<RealtimeRemoveChannelResponse[]> {
+    // TODO: It might need to use `remove` method from socket
     const values_1 = await Promise.all(this.channels.map((channel) => channel.unsubscribe()))
     this.channels = []
     this.disconnect()
@@ -315,44 +238,35 @@ export default class RealtimeClient {
    * For customized logging, `this.logger` can be overridden.
    */
   log(kind: string, msg: string, data?: any) {
-    this.logger(kind, msg, data)
+    this.socket.log(kind, msg, data)
   }
 
   /**
    * Returns the current state of the socket.
    */
   connectionState(): CONNECTION_STATE {
-    switch (this.conn && this.conn.readyState) {
-      case SOCKET_STATES.connecting:
-        return CONNECTION_STATE.Connecting
-      case SOCKET_STATES.open:
-        return CONNECTION_STATE.Open
-      case SOCKET_STATES.closing:
-        return CONNECTION_STATE.Closing
-      default:
-        return CONNECTION_STATE.Closed
-    }
+    return (this.socket && this.socket.connectionState()) || CONNECTION_STATE.Closed
   }
 
   /**
    * Returns `true` is the connection is open.
    */
   isConnected(): boolean {
-    return this.connectionState() === CONNECTION_STATE.Open
+    return this.socket && this.socket.isConnected()
   }
 
   /**
    * Returns `true` if the connection is currently connecting.
    */
   isConnecting(): boolean {
-    return this._connectionState === 'connecting'
+    return this.socket && this.socket.isConnecting()
   }
 
   /**
    * Returns `true` if the connection is currently disconnecting.
    */
   isDisconnecting(): boolean {
-    return this._connectionState === 'disconnecting'
+    return this.socket && this.socket.isDisconnecting()
   }
 
   channel(topic: string, params: RealtimeChannelOptions = { config: {} }): RealtimeChannel {
@@ -375,18 +289,7 @@ export default class RealtimeClient {
    * If the socket is not connected, the message gets enqueued within a local buffer, and sent out when a connection is next established.
    */
   push(data: RealtimeMessage): void {
-    const { topic, event, payload, ref } = data
-    const callback = () => {
-      this.encode(data, (result: any) => {
-        this.conn?.send(result)
-      })
-    }
-    this.log('push', `${topic} ${event} (${ref})`, payload)
-    if (this.isConnected()) {
-      callback()
-    } else {
-      this.sendBuffer.push(callback)
-    }
+    this.socket.push(data)
   }
 
   /**
@@ -431,7 +334,9 @@ export default class RealtimeClient {
 
       // Force reconnection after heartbeat timeout
       this._wasManualDisconnect = false
-      this.conn?.close(WS_CLOSE_NORMAL, 'heartbeat timeout')
+      // TODO: This might not work IDK
+      this.socket.disconnect(WS_CLOSE_NORMAL, 'heartbeat timeout')
+      // this.conn?.close(WS_CLOSE_NORMAL, 'heartbeat timeout')
 
       setTimeout(() => {
         if (!this.isConnected()) {
@@ -461,15 +366,6 @@ export default class RealtimeClient {
   onHeartbeat(callback: (status: HeartbeatStatus) => void): void {
     this.heartbeatCallback = callback
   }
-  /**
-   * Flushes send buffer
-   */
-  flushSendBuffer() {
-    if (this.isConnected() && this.sendBuffer.length > 0) {
-      this.sendBuffer.forEach((callback) => callback())
-      this.sendBuffer = []
-    }
-  }
 
   /**
    * Use either custom fetch, if provided, or default fetch to make HTTP requests
@@ -477,10 +373,24 @@ export default class RealtimeClient {
    * @internal
    */
   _resolveFetch = (customFetch?: Fetch): Fetch => {
+    let _fetch: Fetch
     if (customFetch) {
-      return (...args) => customFetch(...args)
+      _fetch = customFetch
+    } else if (typeof fetch === 'undefined') {
+      // Node.js environment without native fetch
+      _fetch = (...args) =>
+        import('@supabase/node-fetch' as any)
+          .then(({ default: fetch }) => fetch(...args))
+          .catch((error) => {
+            throw new Error(
+              `Failed to load @supabase/node-fetch: ${error.message}. ` +
+                `This is required for HTTP requests in Node.js environments without native fetch.`
+            )
+          })
+    } else {
+      _fetch = fetch
     }
-    return (...args) => fetch(...args)
+    return (...args) => _fetch(...args)
   }
 
   /**
@@ -500,21 +410,6 @@ export default class RealtimeClient {
   }
 
   /**
-   * Unsubscribe from channels with the specified topic.
-   *
-   * @internal
-   */
-  _leaveOpenTopic(topic: string): void {
-    let dupChannel = this.channels.find(
-      (c) => c.topic === topic && (c._isJoined() || c._isJoining())
-    )
-    if (dupChannel) {
-      this.log('transport', `leaving duplicate topic "${topic}"`)
-      dupChannel.unsubscribe()
-    }
-  }
-
-  /**
    * Removes a subscription from the socket.
    *
    * @param channel An open subscription.
@@ -522,231 +417,8 @@ export default class RealtimeClient {
    * @internal
    */
   _remove(channel: RealtimeChannel) {
+    // TODO: It might need to unsubscribe the channel first before removing it.
     this.channels = this.channels.filter((c) => c.topic !== channel.topic)
-  }
-
-  /** @internal */
-  private _onConnMessage(rawMessage: { data: any }) {
-    this.decode(rawMessage.data, (msg: RealtimeMessage) => {
-      // Handle heartbeat responses
-      if (msg.topic === 'phoenix' && msg.event === 'phx_reply') {
-        try {
-          this.heartbeatCallback(msg.payload.status === 'ok' ? 'ok' : 'error')
-        } catch (e) {
-          this.log('error', 'error in heartbeat callback', e)
-        }
-      }
-
-      // Handle pending heartbeat reference cleanup
-      if (msg.ref && msg.ref === this.pendingHeartbeatRef) {
-        this.pendingHeartbeatRef = null
-      }
-
-      // Log incoming message
-      const { topic, event, payload, ref } = msg
-      const refString = ref ? `(${ref})` : ''
-      const status = payload.status || ''
-      this.log('receive', `${status} ${topic} ${event} ${refString}`.trim(), payload)
-
-      // Route message to appropriate channels
-      this.channels
-        .filter((channel: RealtimeChannel) => channel._isMember(topic))
-        .forEach((channel: RealtimeChannel) => channel._trigger(event, payload, ref))
-
-      this._triggerStateCallbacks('message', msg)
-    })
-  }
-
-  /**
-   * Clear specific timer
-   * @internal
-   */
-  private _clearTimer(timer: 'heartbeat' | 'reconnect'): void {
-    if (timer === 'heartbeat' && this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer)
-      this.heartbeatTimer = undefined
-    } else if (timer === 'reconnect') {
-      this.reconnectTimer?.reset()
-    }
-  }
-
-  /**
-   * Clear all timers
-   * @internal
-   */
-  private _clearAllTimers(): void {
-    this._clearTimer('heartbeat')
-    this._clearTimer('reconnect')
-  }
-
-  /**
-   * Setup connection handlers for WebSocket events
-   * @internal
-   */
-  private _setupConnectionHandlers(): void {
-    if (!this.conn) return
-
-    // Set binary type if supported (browsers and most WebSocket implementations)
-    if ('binaryType' in this.conn) {
-      ;(this.conn as any).binaryType = 'arraybuffer'
-    }
-
-    this.conn.onopen = () => this._onConnOpen()
-    this.conn.onerror = (error: Event) => this._onConnError(error)
-    this.conn.onmessage = (event: any) => this._onConnMessage(event)
-    this.conn.onclose = (event: any) => this._onConnClose(event)
-  }
-
-  /**
-   * Teardown connection and cleanup resources
-   * @internal
-   */
-  private _teardownConnection(): void {
-    if (this.conn) {
-      if (
-        this.conn.readyState === SOCKET_STATES.open ||
-        this.conn.readyState === SOCKET_STATES.connecting
-      ) {
-        try {
-          this.conn.close()
-        } catch (e) {
-          this.log('error', 'Error closing connection', e)
-        }
-      }
-
-      this.conn.onopen = null
-      this.conn.onerror = null
-      this.conn.onmessage = null
-      this.conn.onclose = null
-      this.conn = null
-    }
-    this._clearAllTimers()
-    this.channels.forEach((channel) => channel.teardown())
-  }
-
-  /** @internal */
-  private _onConnOpen() {
-    this._setConnectionState('connected')
-    this.log('transport', `connected to ${this.endpointURL()}`)
-
-    // Wait for any pending auth operations before flushing send buffer
-    // This ensures channel join messages include the correct access token
-    const authPromise =
-      this._authPromise ||
-      (this.accessToken && !this.accessTokenValue ? this.setAuth() : Promise.resolve())
-
-    authPromise
-      .then(() => {
-        this.flushSendBuffer()
-      })
-      .catch((e) => {
-        this.log('error', 'error waiting for auth on connect', e)
-        // Proceed anyway to avoid hanging connections
-        this.flushSendBuffer()
-      })
-
-    this._clearTimer('reconnect')
-
-    if (!this.worker) {
-      this._startHeartbeat()
-    } else {
-      if (!this.workerRef) {
-        this._startWorkerHeartbeat()
-      }
-    }
-
-    this._triggerStateCallbacks('open')
-  }
-  /** @internal */
-  private _startHeartbeat() {
-    this.heartbeatTimer && clearInterval(this.heartbeatTimer)
-    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), this.heartbeatIntervalMs)
-  }
-
-  /** @internal */
-  private _startWorkerHeartbeat() {
-    if (this.workerUrl) {
-      this.log('worker', `starting worker for from ${this.workerUrl}`)
-    } else {
-      this.log('worker', `starting default worker`)
-    }
-    const objectUrl = this._workerObjectUrl(this.workerUrl!)
-    this.workerRef = new Worker(objectUrl)
-    this.workerRef.onerror = (error) => {
-      this.log('worker', 'worker error', (error as ErrorEvent).message)
-      this.workerRef!.terminate()
-    }
-    this.workerRef.onmessage = (event) => {
-      if (event.data.event === 'keepAlive') {
-        this.sendHeartbeat()
-      }
-    }
-    this.workerRef.postMessage({
-      event: 'start',
-      interval: this.heartbeatIntervalMs,
-    })
-  }
-  /** @internal */
-  private _onConnClose(event: any) {
-    this._setConnectionState('disconnected')
-    this.log('transport', 'close', event)
-    this._triggerChanError()
-    this._clearTimer('heartbeat')
-
-    // Only schedule reconnection if it wasn't a manual disconnect
-    if (!this._wasManualDisconnect) {
-      this.reconnectTimer?.scheduleTimeout()
-    }
-
-    this._triggerStateCallbacks('close', event)
-  }
-
-  /** @internal */
-  private _onConnError(error: Event) {
-    this._setConnectionState('disconnected')
-    this.log('transport', `${error}`)
-    this._triggerChanError()
-    this._triggerStateCallbacks('error', error)
-  }
-
-  /** @internal */
-  private _triggerChanError() {
-    this.channels.forEach((channel: RealtimeChannel) => channel._trigger(CHANNEL_EVENTS.error))
-  }
-
-  /** @internal */
-  private _appendParams(url: string, params: { [key: string]: string }): string {
-    if (Object.keys(params).length === 0) {
-      return url
-    }
-    const prefix = url.match(/\?/) ? '&' : '?'
-    const query = new URLSearchParams(params)
-    return `${url}${prefix}${query}`
-  }
-
-  private _workerObjectUrl(url: string | undefined): string {
-    let result_url: string
-    if (url) {
-      result_url = url
-    } else {
-      const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' })
-      result_url = URL.createObjectURL(blob)
-    }
-    return result_url
-  }
-
-  /**
-   * Set connection state with proper state management
-   * @internal
-   */
-  private _setConnectionState(state: RealtimeClientState, manual = false): void {
-    this._connectionState = state
-
-    if (state === 'connecting') {
-      this._wasManualDisconnect = false
-    } else if (state === 'disconnecting') {
-      this._wasManualDisconnect = manual
-    }
   }
 
   /**
@@ -765,6 +437,8 @@ export default class RealtimeClient {
       tokenToSend = this.accessTokenValue
     }
 
+    this.log('auth', 'performing auth', { token: tokenToSend })
+
     if (this.accessTokenValue != tokenToSend) {
       this.accessTokenValue = tokenToSend
       this.channels.forEach((channel) => {
@@ -775,10 +449,15 @@ export default class RealtimeClient {
 
         tokenToSend && channel.updateJoinPayload(payload)
 
-        if (channel.joinedOnce && channel._isJoined()) {
-          channel._push(CHANNEL_EVENTS.access_token, {
+        // TODO: Try catch trick. Maybe it is not needed.
+        // Cannot access joinedOnce. If exposed there could be check instead of try.
+        try {
+          channel.phoenixChannel.push(CHANNEL_EVENTS.access_token, {
             access_token: tokenToSend,
           })
+          this.log('auth', 'pushed access token', { token: tokenToSend })
+        } catch (e) {
+          this.log('auth', 'error pushing access token', e)
         }
       })
     }
@@ -802,24 +481,6 @@ export default class RealtimeClient {
     this.setAuth().catch((e) => {
       this.log('error', `error setting auth in ${context}`, e)
     })
-  }
-
-  /**
-   * Trigger state change callbacks with proper error handling
-   * @internal
-   */
-  private _triggerStateCallbacks(event: keyof typeof this.stateChangeCallbacks, data?: any): void {
-    try {
-      this.stateChangeCallbacks[event].forEach((callback) => {
-        try {
-          callback(data)
-        } catch (e) {
-          this.log('error', `error in ${event} callback`, e)
-        }
-      })
-    } catch (e) {
-      this.log('error', `error triggering ${event} callbacks`, e)
-    }
   }
 
   /**
@@ -850,11 +511,10 @@ export default class RealtimeClient {
     this.worker = options?.worker ?? false
     this.accessToken = options?.accessToken ?? null
     this.heartbeatCallback = options?.heartbeatCallback ?? noop
-    this.vsn = options?.vsn ?? DEFAULT_VSN
 
     // Handle special cases
     if (options?.params) this.params = options.params
-    if (options?.logger) this.logger = options.logger
+    // if (options?.logger) this.logger = options.logger // Part of PhoenixSocket
     if (options?.logLevel || options?.log_level) {
       this.logLevel = options.logLevel || options.log_level
       this.params = { ...this.params, log_level: this.logLevel as string }
@@ -866,28 +526,6 @@ export default class RealtimeClient {
       ((tries: number) => {
         return RECONNECT_INTERVALS[tries - 1] || DEFAULT_RECONNECT_FALLBACK
       })
-
-    switch (this.vsn) {
-      case VSN_1_0_0:
-        this.encode =
-          options?.encode ??
-          ((payload: JSON, callback: Function) => {
-            return callback(JSON.stringify(payload))
-          })
-
-        this.decode =
-          options?.decode ??
-          ((payload: string, callback: Function) => {
-            return callback(JSON.parse(payload))
-          })
-        break
-      case VSN_2_0_0:
-        this.encode = options?.encode ?? this.serializer.encode.bind(this.serializer)
-        this.decode = options?.decode ?? this.serializer.decode.bind(this.serializer)
-        break
-      default:
-        throw new Error(`Unsupported serializer version: ${this.vsn}`)
-    }
 
     // Handle worker setup
     if (this.worker) {
