@@ -145,7 +145,7 @@ export default class RealtimeClient {
 
     this.phoenixSocketOptions = {
       params: options?.params ?? {},
-      transport: options?.transport,
+      transport: options?.transport ?? WebSocketFactory.getWebSocketConstructor(),
       timeout: options?.timeout ?? DEFAULT_TIMEOUT,
       heartbeatIntervalMs: options?.heartbeatIntervalMs ?? CONNECTION_TIMEOUTS.HEARTBEAT_INTERVAL,
       logger: options?.logger,

@@ -15,7 +15,7 @@ export type SocketConnectOption = {
 }
 
 // TODO: Check if this is correct
-export type PresenceState = {
+export type RawPresenceState = {
   [key: string]: {
     metas: {
       phx_ref?: string
@@ -217,6 +217,18 @@ export type PresenceOpts = {
   }
 }
 
+type PresenceOnJoinCallback = (
+  key: string,
+  currentPresences: Presence[],
+  newPresences: Presence[]
+) => void
+
+type PresenceOnLeaveCallback = (
+  key: string,
+  currentPresences: Presence[],
+  leftPresences: Presence[]
+) => void
+
 export class PhoenixPresence {
   private presence: Presence
 
@@ -224,20 +236,19 @@ export class PhoenixPresence {
     this.presence = channel.presence(opts)
   }
 
-  // TODO: Add better typing for the callback
-  onJoin(callback: Function): void {
+  onJoin(callback: PresenceOnJoinCallback): void {
     this.presence.onJoin(callback)
   }
 
-  onLeave(callback: Function): void {
+  onLeave(callback: PresenceOnLeaveCallback): void {
     this.presence.onLeave(callback)
   }
 
-  onSync(callback: Function): void {
+  onSync(callback: () => void): void {
     this.presence.onSync(callback)
   }
 
-  state(): PresenceState {
-    return this.presence.state as PresenceState
+  state(): RawPresenceState {
+    return this.presence.state
   }
 }

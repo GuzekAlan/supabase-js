@@ -3,23 +3,8 @@
   License: https://github.com/phoenixframework/phoenix/blob/d344ec0a732ab4ee204215b31de69cf4be72e3bf/LICENSE.md
 */
 
-// TODO: This does not work with the new implementation. Uncomment and fix the code.
-
-// import type { PresenceOpts, PresenceOnJoinCallback, PresenceOnLeaveCallback } from 'phoenix'
 import type RealtimeChannel from './RealtimeChannel'
-import { PhoenixPresence, PresenceOpts } from './lib/phoenixAdapter'
-
-type PresenceOnJoinCallback = (
-  key: string,
-  currentPresences: Presence[],
-  newPresences: Presence[]
-) => void
-
-type PresenceOnLeaveCallback = (
-  key: string,
-  currentPresences: Presence[],
-  leftPresences: Presence[]
-) => void
+import { PhoenixPresence, PresenceOpts, RawPresenceState } from './lib/phoenixAdapter'
 
 type Presence<T extends { [key: string]: any } = {}> = {
   presence_ref: string
@@ -49,28 +34,6 @@ export enum REALTIME_PRESENCE_LISTEN_EVENTS {
   LEAVE = 'leave',
 }
 
-type PresenceDiff = {
-  joins: RealtimePresenceState
-  leaves: RealtimePresenceState
-}
-
-type RawPresenceState = {
-  [key: string]: {
-    metas: {
-      phx_ref?: string
-      phx_ref_prev?: string
-      [key: string]: any
-    }[]
-  }
-}
-
-type RawPresenceDiff = {
-  joins: RawPresenceState
-  leaves: RawPresenceState
-}
-
-type PresenceChooser<T> = (key: string, presences: Presence[]) => T
-
 export default class RealtimePresence {
   private presence: PhoenixPresence
 
@@ -87,7 +50,7 @@ export default class RealtimePresence {
   ) {
     this.presence = new PhoenixPresence(channel.phoenixChannel, opts)
 
-    this.presence.onJoin((key: any, currentPresences: any, newPresences: any) => {
+    this.presence.onJoin((key, currentPresences, newPresences) => {
       this.channel._trigger('presence', {
         event: 'join',
         key,
@@ -96,7 +59,7 @@ export default class RealtimePresence {
       })
     })
 
-    this.presence.onLeave((key: any, currentPresences: any, leftPresences: any) => {
+    this.presence.onLeave((key, currentPresences, leftPresences) => {
       this.channel._trigger('presence', {
         event: 'leave',
         key,
@@ -110,8 +73,58 @@ export default class RealtimePresence {
     })
   }
 
-  // TODO: Fix typing
-  state(): any {
-    return this.presence.state()
+  state(): RealtimePresenceState {
+    return RealtimePresence.transformState(this.presence.state())
+  }
+
+  /**
+   * Remove 'metas' key
+   * Change 'phx_ref' to 'presence_ref'
+   * Remove 'phx_ref' and 'phx_ref_prev'
+   *
+   * @example
+   * // returns {
+   *  abc123: [
+   *    { presence_ref: '2', user_id: 1 },
+   *    { presence_ref: '3', user_id: 2 }
+   *  ]
+   * }
+   * RealtimePresence.transformState({
+   *  abc123: {
+   *    metas: [
+   *      { phx_ref: '2', phx_ref_prev: '1' user_id: 1 },
+   *      { phx_ref: '3', user_id: 2 }
+   *    ]
+   *  }
+   * })
+   *
+   * @internal
+   */
+  private static transformState(state: RawPresenceState): RealtimePresenceState {
+    state = this.cloneDeep(state)
+
+    return Object.getOwnPropertyNames(state).reduce((newState, key) => {
+      const presences = state[key]
+
+      if ('metas' in presences) {
+        newState[key] = presences.metas.map((presence) => {
+          presence['presence_ref'] = presence['phx_ref']
+
+          delete presence['phx_ref']
+          delete presence['phx_ref_prev']
+
+          return presence
+        }) as Presence[]
+      } else {
+        newState[key] = presences
+      }
+
+      return newState
+    }, {} as RealtimePresenceState)
+  }
+
+  /** @internal */
+  private static cloneDeep(obj: { [key: string]: any }) {
+    return JSON.parse(JSON.stringify(obj))
   }
 }

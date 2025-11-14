@@ -630,7 +630,6 @@ export default class RealtimeChannel {
    * To receive leave acknowledgements, use the a `receive` hook to bind to the server ack, ie:
    * channel.unsubscribe().receive("ok", () => alert("left!") )
    */
-  // TODO: unsubscribe doesn't work as expected. Need to check if it is a phoenix issue or a realtime issue.
   unsubscribe(timeout = this.timeout): Promise<'ok' | 'timed out' | 'error'> {
     return new Promise((resolve) => {
       this.phoenixChannel
