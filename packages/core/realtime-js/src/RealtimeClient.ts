@@ -156,6 +156,7 @@ export default class RealtimeClient {
         ((tries: number) => {
           return RECONNECT_INTERVALS[tries - 1] || DEFAULT_RECONNECT_FALLBACK
         }),
+      heartbeatEnabled: !options?.worker,
     }
 
     this._initializeOptions(options)

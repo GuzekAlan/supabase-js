@@ -34,6 +34,7 @@ export type PhoenixSocketOptions = {
   encode?: Function
   decode?: Function
   reconnectAfterMs: Function
+  heartbeatEnabled: boolean
 }
 
 type PhoenixBinding = { event: string; ref: number; callback: Function }
