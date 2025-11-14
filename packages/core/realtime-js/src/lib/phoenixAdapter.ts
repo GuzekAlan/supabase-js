@@ -1,7 +1,6 @@
 import { Channel, Socket, Push } from 'phoenix'
 import { CONNECTION_STATE, CHANNEL_STATES } from './constants'
 import { RealtimeChannelOptions } from '../RealtimeChannel'
-import { RealtimeClientOptions } from '../RealtimeClient'
 import { Presence } from 'phoenix'
 
 export type SocketConnectOption = {
@@ -26,12 +25,24 @@ export type PresenceState = {
   }
 }
 
+export type PhoenixSocketOptions = {
+  params: { [key: string]: string }
+  transport?: Function
+  timeout: number
+  heartbeatIntervalMs: number
+  logger?: Function
+  encode?: Function
+  decode?: Function
+  reconnectAfterMs: Function
+}
+
 type PhoenixBinding = { event: string; ref: number; callback: Function }
 
 export class PhoenixSocket {
   private socket: Socket
 
-  constructor(endPoint: string, options?: RealtimeClientOptions) {
+  constructor(endPoint: string, options: PhoenixSocketOptions) {
+    // options.heartbeatIntervalMs = 1000000000
     this.socket = new Socket(endPoint, options)
   }
 
@@ -69,6 +80,22 @@ export class PhoenixSocket {
 
   endPointURL(): string {
     return this.socket.endPointURL()
+  }
+
+  onOpen(callback: Function): void {
+    this.socket.onOpen(callback)
+  }
+
+  onClose(callback: Function): void {
+    this.socket.onClose(callback)
+  }
+
+  onError(callback: Function): void {
+    this.socket.onError(callback)
+  }
+
+  onMessage(callback: Function): void {
+    this.socket.onMessage(callback)
   }
 
   /**
@@ -163,36 +190,6 @@ export class PhoenixChannel {
     return new Presence(this.channel, opts)
   }
 }
-
-// function translateRealtimeOptionsToSocketOptions(
-//   options?: RealtimeClientOptions
-// ): SocketConnectOption {
-//   if (!options) {
-//     return {} as SocketConnectOption
-//   }
-
-//   // TODO: Better way to handle this
-
-//   const params = options.params || undefined
-//   const transport = options.transport || undefined
-//   const timeout = options.timeout || undefined
-//   const heartbeatIntervalMs = options.heartbeatIntervalMs || undefined
-//   const logger = options.logger || undefined
-//   const encode = options.encode || undefined
-//   const decode = options.decode || undefined
-//   const reconnectAfterMs = options.reconnectAfterMs || undefined
-
-//   return {
-//     params,
-//     transport,
-//     timeout,
-//     heartbeatIntervalMs,
-//     logger,
-//     encode,
-//     decode,
-//     reconnectAfterMs,
-//   } as SocketConnectOption
-// }
 
 /**
  * Translates Supabase RealtimeChannelOptions to Phoenix channel params format

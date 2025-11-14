@@ -1,6 +1,6 @@
 import WebSocketFactory, { WebSocketLike } from './lib/websocket-factory'
 
-import { PhoenixSocket } from './lib/phoenixAdapter'
+import { PhoenixSocket, PhoenixSocketOptions } from './lib/phoenixAdapter'
 
 import {
   CHANNEL_EVENTS,
@@ -62,6 +62,7 @@ export interface WebSocketLikeError {
 }
 
 export type RealtimeClientOptions = {
+  params?: { [key: string]: any }
   transport?: WebSocketLikeConstructor
   timeout?: number
   heartbeatIntervalMs?: number
@@ -69,7 +70,6 @@ export type RealtimeClientOptions = {
   encode?: Function
   decode?: Function
   reconnectAfterMs?: Function
-  params?: { [key: string]: any }
 
   headers?: { [key: string]: string }
   //Deprecated: Use it in favour of correct casing `logLevel`
@@ -92,38 +92,36 @@ const WORKER_SCRIPT = `
 
 export default class RealtimeClient {
   socket: PhoenixSocket
+  phoenixSocketOptions: PhoenixSocketOptions
+
+  channels: RealtimeChannel[] = []
+
   accessTokenValue: string | null = null
+  accessToken: (() => Promise<string | null>) | null = null
   apiKey: string | null = null
-  channels: RealtimeChannel[] = new Array()
-  // endPoint: string = '' // It is done in PhoenixSocket
+
   httpEndpoint: string = ''
-  /** @deprecated headers cannot be set on websocket connections */
-  headers?: { [key: string]: string } = {}
-  params?: { [key: string]: string } = {}
-  timeout: number = DEFAULT_TIMEOUT
-  transport: WebSocketLikeConstructor | null = null
-  heartbeatIntervalMs: number = CONNECTION_TIMEOUTS.HEARTBEAT_INTERVAL
+
+  reconnectTimer: Timer | null = null
+
   heartbeatTimer: ReturnType<typeof setInterval> | undefined = undefined
   pendingHeartbeatRef: string | null = null
   heartbeatCallback: (status: HeartbeatStatus) => void = noop
   ref: number = 0
-  reconnectTimer: Timer | null = null
+
   logLevel?: LogLevel
-  reconnectAfterMs!: Function
   fetch: Fetch
-  accessToken: (() => Promise<string | null>) | null = null
+
   worker?: boolean
   workerUrl?: string
   workerRef?: Worker
-  // private _connectionState: RealtimeClientState = 'disconnected' // Probably not needed
-  private _wasManualDisconnect: boolean = false
+
   private _authPromise: Promise<void> | null = null
 
   /**
    * Initializes the Socket.
    *
    * @param endPoint The string WebSocket endpoint, ie, "ws://example.com/socket", "wss://example.com", "/socket" (inherited host & protocol)
-   * @param httpEndpoint The string HTTP endpoint, ie, "https://example.com", "/" (inherited host & protocol)
    * @param options.transport The Websocket Transport, for example WebSocket. This can be a custom implementation
    * @param options.timeout The default timeout in milliseconds to trigger push timeouts.
    * @param options.params The optional params to pass when connecting.
@@ -145,11 +143,26 @@ export default class RealtimeClient {
     }
     this.apiKey = options.params.apikey
 
+    this.phoenixSocketOptions = {
+      params: options?.params ?? {},
+      transport: options?.transport,
+      timeout: options?.timeout ?? DEFAULT_TIMEOUT,
+      heartbeatIntervalMs: options?.heartbeatIntervalMs ?? CONNECTION_TIMEOUTS.HEARTBEAT_INTERVAL,
+      logger: options?.logger,
+      encode: options?.encode,
+      decode: options?.decode,
+      reconnectAfterMs:
+        options?.reconnectAfterMs ??
+        ((tries: number) => {
+          return RECONNECT_INTERVALS[tries - 1] || DEFAULT_RECONNECT_FALLBACK
+        }),
+    }
+
     this._initializeOptions(options)
     this._setupReconnectionTimer()
     this.fetch = this._resolveFetch(options?.fetch)
 
-    this.socket = new PhoenixSocket(endPoint, options)
+    this.socket = new PhoenixSocket(endPoint, this.phoenixSocketOptions)
 
     this.httpEndpoint = httpEndpointURL(this.socket.endPointURL()) // Moved after creating PhoenixSocket
   }
@@ -173,6 +186,8 @@ export default class RealtimeClient {
     if (this.accessToken && !this._authPromise) {
       this._setAuthSafely('connect')
     }
+
+    this._setupConnectionHandlers()
 
     this.socket.connect()
   }
@@ -333,7 +348,7 @@ export default class RealtimeClient {
       }
 
       // Force reconnection after heartbeat timeout
-      this._wasManualDisconnect = false
+      // this._wasManualDisconnect = false
       // TODO: This might not work IDK
       this.socket.disconnect(WS_CLOSE_NORMAL, 'heartbeat timeout')
       // this.conn?.close(WS_CLOSE_NORMAL, 'heartbeat timeout')
@@ -441,6 +456,7 @@ export default class RealtimeClient {
 
     if (this.accessTokenValue != tokenToSend) {
       this.accessTokenValue = tokenToSend
+      this.log('auth', 'access token changed', { token: tokenToSend })
       this.channels.forEach((channel) => {
         const payload = {
           access_token: tokenToSend,
@@ -495,7 +511,82 @@ export default class RealtimeClient {
           this.connect()
         }
       }, CONNECTION_TIMEOUTS.RECONNECT_DELAY)
-    }, this.reconnectAfterMs)
+    }, this.phoenixSocketOptions.reconnectAfterMs)
+  }
+
+  private _setupConnectionHandlers(): void {
+    this.socket.onOpen(() => {
+      const authPromise =
+        this._authPromise ||
+        (this.accessToken && !this.accessTokenValue ? this.setAuth() : Promise.resolve())
+
+      authPromise
+        .then(() => {
+          this.log('auth', 'auth completed on connect')
+        })
+        .catch((e) => {
+          this.log('error', 'error waiting for auth on connect', e)
+        })
+
+      if (this.worker && !this.workerRef) {
+        this._startWorkerHeartbeat()
+      }
+    })
+    this.socket.onClose(() => {
+      if (this.worker && this.workerRef) {
+        this._stopWorkerHeartbeat()
+      }
+    })
+    this.socket.onMessage((message: RealtimeMessage) => {
+      if (message.ref && message.ref === this.pendingHeartbeatRef) {
+        this.pendingHeartbeatRef = null
+      }
+    })
+  }
+
+  // WORKER HEARTBEAT
+
+  /** @internal */
+  private _startWorkerHeartbeat() {
+    if (this.workerUrl) {
+      this.log('worker', `starting worker for from ${this.workerUrl}`)
+    } else {
+      this.log('worker', `starting default worker`)
+    }
+    const objectUrl = this._workerObjectUrl(this.workerUrl!)
+    this.workerRef = new Worker(objectUrl)
+    this.workerRef.onerror = (error) => {
+      this.log('worker', 'worker error', (error as ErrorEvent).message)
+      this.workerRef!.terminate()
+    }
+    this.workerRef.onmessage = (event) => {
+      if (event.data.event === 'keepAlive') {
+        console.log('keepAlive event received')
+        this.sendHeartbeat()
+      }
+    }
+    this.workerRef.postMessage({
+      event: 'start',
+      interval: this.phoenixSocketOptions?.heartbeatIntervalMs,
+    })
+  }
+
+  private _stopWorkerHeartbeat() {
+    if (this.workerRef) {
+      this.workerRef.terminate()
+      this.workerRef = undefined
+    }
+  }
+
+  private _workerObjectUrl(url: string | undefined): string {
+    let result_url: string
+    if (url) {
+      result_url = url
+    } else {
+      const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' })
+      result_url = URL.createObjectURL(blob)
+    }
+    return result_url
   }
 
   /**
@@ -503,29 +594,18 @@ export default class RealtimeClient {
    * @internal
    */
   private _initializeOptions(options?: RealtimeClientOptions): void {
-    // Set defaults
-    this.transport = options?.transport ?? null
-    this.timeout = options?.timeout ?? DEFAULT_TIMEOUT
-    this.heartbeatIntervalMs =
-      options?.heartbeatIntervalMs ?? CONNECTION_TIMEOUTS.HEARTBEAT_INTERVAL
     this.worker = options?.worker ?? false
     this.accessToken = options?.accessToken ?? null
     this.heartbeatCallback = options?.heartbeatCallback ?? noop
 
     // Handle special cases
-    if (options?.params) this.params = options.params
-    // if (options?.logger) this.logger = options.logger // Part of PhoenixSocket
     if (options?.logLevel || options?.log_level) {
       this.logLevel = options.logLevel || options.log_level
-      this.params = { ...this.params, log_level: this.logLevel as string }
+      this.phoenixSocketOptions.params = {
+        ...this.phoenixSocketOptions.params,
+        log_level: this.logLevel as string,
+      }
     }
-
-    // Set up functions with defaults
-    this.reconnectAfterMs =
-      options?.reconnectAfterMs ??
-      ((tries: number) => {
-        return RECONNECT_INTERVALS[tries - 1] || DEFAULT_RECONNECT_FALLBACK
-      })
 
     // Handle worker setup
     if (this.worker) {

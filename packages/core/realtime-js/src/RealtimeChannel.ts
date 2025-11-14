@@ -197,7 +197,7 @@ export default class RealtimeChannel {
     this.phoenixChannel = new PhoenixChannel(client.socket, topic, this.params)
     this.presence = new RealtimePresence(this)
 
-    this.timeout = client.timeout
+    this.timeout = client.phoenixSocketOptions.timeout
     this.broadcastEndpointURL = Transformers.httpEndpointURL(this.client.socket.endPointURL())
     this.private = this.params.config.private || false
 
@@ -257,18 +257,7 @@ export default class RealtimeChannel {
 
           const clientPostgresBindings = this.bindings.postgres_changes
 
-          const updatedPostgresBindings = this._updatePostgresBindings(
-            clientPostgresBindings,
-            postgres_changes,
-            callback
-          )
-
-          if (updatedPostgresBindings) {
-            this.bindings.postgres_changes = updatedPostgresBindings
-            this._updateFilterMessage()
-          }
-
-          callback && callback(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED)
+          this._updatePostgresBindings(clientPostgresBindings, postgres_changes, callback)
         })
         .receive('error', (error: { [key: string]: any }) => {
           this.phoenixChannel.setState(CHANNEL_STATES.errored)
@@ -322,7 +311,9 @@ export default class RealtimeChannel {
       }
     }
 
-    return newPostgresBindings
+    this.bindings.postgres_changes = newPostgresBindings
+
+    callback && callback(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED)
   }
 
   presenceState<T extends { [key: string]: any } = {}>(): RealtimePresenceState<T> {
