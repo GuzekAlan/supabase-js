@@ -227,7 +227,6 @@ export default class RealtimeClient {
    * @param channel A RealtimeChannel instance
    */
   async removeChannel(channel: RealtimeChannel): Promise<RealtimeRemoveChannelResponse> {
-    // TODO: It might need to use `remove` method from socket
     const status = await channel.unsubscribe()
 
     if (this.channels.length === 0) {
@@ -241,7 +240,6 @@ export default class RealtimeClient {
    * Unsubscribes and removes all channels
    */
   async removeAllChannels(): Promise<RealtimeRemoveChannelResponse[]> {
-    // TODO: It might need to use `remove` method from socket
     const values_1 = await Promise.all(this.channels.map((channel) => channel.unsubscribe()))
     this.channels = []
     this.disconnect()
@@ -352,7 +350,6 @@ export default class RealtimeClient {
       // this._wasManualDisconnect = false
       // TODO: This might not work IDK
       this.socket.disconnect(WS_CLOSE_NORMAL, 'heartbeat timeout')
-      // this.conn?.close(WS_CLOSE_NORMAL, 'heartbeat timeout')
 
       setTimeout(() => {
         if (!this.isConnected()) {
