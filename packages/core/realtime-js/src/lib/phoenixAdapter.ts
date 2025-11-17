@@ -14,7 +14,6 @@ export type SocketConnectOption = {
   reconnectAfterMs?: number
 }
 
-// TODO: Check if this is correct
 export type RawPresenceState = {
   [key: string]: {
     metas: {
@@ -97,6 +96,10 @@ export class PhoenixSocket {
 
   onMessage(callback: Function): void {
     this.socket.onMessage(callback)
+  }
+
+  makeRef(): string {
+    return this.socket.makeRef()
   }
 
   /**

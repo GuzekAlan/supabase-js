@@ -107,7 +107,6 @@ export default class RealtimeClient {
   heartbeatTimer: ReturnType<typeof setInterval> | undefined = undefined
   pendingHeartbeatRef: string | null = null
   heartbeatCallback: (status: HeartbeatStatus) => void = noop
-  ref: number = 0
 
   logLevel?: LogLevel
   fetch: Fetch
@@ -347,8 +346,6 @@ export default class RealtimeClient {
       }
 
       // Force reconnection after heartbeat timeout
-      // this._wasManualDisconnect = false
-      // TODO: This might not work IDK
       this.socket.disconnect(WS_CLOSE_NORMAL, 'heartbeat timeout')
 
       setTimeout(() => {
@@ -412,14 +409,7 @@ export default class RealtimeClient {
    * @internal
    */
   _makeRef(): string {
-    let newRef = this.ref + 1
-    if (newRef === this.ref) {
-      this.ref = 0
-    } else {
-      this.ref = newRef
-    }
-
-    return this.ref.toString()
+    return this.socket.makeRef()
   }
 
   /**

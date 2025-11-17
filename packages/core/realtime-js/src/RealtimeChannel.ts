@@ -216,6 +216,7 @@ export default class RealtimeChannel {
     }
 
     // TODO: Check with previous implementation.
+    // TODO: Make errors look same.
     if (this.phoenixChannel.state() == 'closed') {
       const {
         config: { broadcast, presence, private: isPrivate },
@@ -255,9 +256,7 @@ export default class RealtimeChannel {
             return
           }
 
-          const clientPostgresBindings = this.bindings.postgres_changes
-
-          this._updatePostgresBindings(clientPostgresBindings, postgres_changes, callback)
+          this._updatePostgresBindings(postgres_changes, callback)
         })
         .receive('error', (error: { [key: string]: any }) => {
           this.phoenixChannel.setState(CHANNEL_STATES.errored)
@@ -274,10 +273,10 @@ export default class RealtimeChannel {
   }
 
   private _updatePostgresBindings(
-    clientPostgresBindings: Binding[], // TODO: Fix typing
     postgres_changes: PostgresChangesFilters['postgres_changes'],
     callback?: (status: REALTIME_SUBSCRIBE_STATES, err?: Error) => void
   ): Binding[] | undefined {
+    const clientPostgresBindings = this.bindings.postgres_changes
     const bindingsLen = clientPostgresBindings?.length ?? 0
     const newPostgresBindings = []
 
@@ -719,24 +718,24 @@ export default class RealtimeChannel {
     return this
   }
 
-  /** @internal */
-  _off(type: string, filter: { [key: string]: any }) {
-    const typeLower = type.toLocaleLowerCase()
+  // /** @internal */
+  // _off(type: string, filter: { [key: string]: any }) {
+  //   const typeLower = type.toLocaleLowerCase()
 
-    const bind = this.bindings[typeLower]?.find((bind) => {
-      return (
-        bind.type?.toLocaleLowerCase() === typeLower && RealtimeChannel.isEqual(bind.filter, filter)
-      )
-    })
+  //   const bind = this.bindings[typeLower]?.find((bind) => {
+  //     return (
+  //       bind.type?.toLocaleLowerCase() === typeLower && RealtimeChannel.isEqual(bind.filter, filter)
+  //     )
+  //   })
 
-    if (bind) {
-      this.bindings[typeLower] = this.bindings[typeLower]?.filter((bind) => bind.ref !== bind.ref)
-      this._updateFilterMessage()
-      this.phoenixChannel.off(type, bind.ref)
-    }
+  //   if (bind) {
+  //     this.bindings[typeLower] = this.bindings[typeLower]?.filter((bind) => bind.ref !== bind.ref)
+  //     this._updateFilterMessage()
+  //     this.phoenixChannel.off(type, bind.ref)
+  //   }
 
-    return this
-  }
+  //   return this
+  // }
 
   /** @internal */
   private static isEqual(obj1: { [key: string]: string }, obj2: { [key: string]: string }) {
