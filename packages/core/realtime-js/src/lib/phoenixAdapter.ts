@@ -146,6 +146,12 @@ export class PhoenixChannel {
     this.channel.filterMessage = filterMessage
   }
 
+  updatePayloadTransform(
+    payloadTransform: (event: string, payload: object, ref: number | undefined) => object
+  ): void {
+    this.channel.onMessage = payloadTransform
+  }
+
   subscribe(timeout?: number | undefined): Push {
     this.channel.joinedOnce = false // Reset joinedOnce flag to allow multiple joins
     return this.channel.join(timeout)

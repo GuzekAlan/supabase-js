@@ -244,6 +244,8 @@ export default class RealtimeChannel {
 
       this._onClose(() => callback?.(REALTIME_SUBSCRIBE_STATES.CLOSED))
 
+      this._updateFilterTransform()
+
       this.updateJoinPayload({ ...{ config }, ...accessTokenPayload })
 
       this.phoenixChannel
@@ -661,23 +663,6 @@ export default class RealtimeChannel {
     return response
   }
 
-  /**
-   * Overridable message hook
-   *
-   * Receives all events for specialized message handling before dispatching to the channel callbacks.
-   * Must return the payload, modified or unmodified.
-   *
-   * @internal
-   */
-  _onMessage(_event: string, payload: any, _ref?: string) {
-    return payload
-  }
-
-  /** @internal */
-  _isMember(topic: string): boolean {
-    return this.topic === topic
-  }
-
   /** @internal */
   _joinRef(): string {
     return this.phoenixChannel.joinRef()
@@ -687,11 +672,6 @@ export default class RealtimeChannel {
   _trigger(type: string, payload?: any, ref?: string) {
     // TODO: There might be a more in this
     this.phoenixChannel.trigger(type, payload, ref)
-  }
-
-  /** @internal */
-  _replyEventName(ref: string): string {
-    return `chan_reply_${ref}`
   }
 
   /** @internal */
@@ -770,9 +750,11 @@ export default class RealtimeChannel {
     this._on(CHANNEL_EVENTS.error, {}, (reason: string) => callback(reason))
   }
 
+  /** @internal */
   private _updateFilterMessage() {
-    this.phoenixChannel.updateFilterMessage((event, payload: any, ref, phoenixBind) => {
+    this.phoenixChannel.updateFilterMessage((event, payload: any, messageRef, phoenixBind) => {
       const typeLower = event.toLocaleLowerCase()
+      console.log(this.bindings)
       const bind = this.bindings[typeLower]?.find((bind) => bind.ref === phoenixBind.ref)
 
       if (!bind) {
@@ -797,6 +779,31 @@ export default class RealtimeChannel {
       } else {
         return bind.type.toLocaleLowerCase() === typeLower
       }
+    })
+  }
+
+  /** @internal */
+  private _updateFilterTransform() {
+    this.phoenixChannel.updatePayloadTransform((event, payload: any, ref) => {
+      if (typeof payload === 'object' && 'ids' in payload) {
+        const postgresChanges = payload.data
+        const { schema, table, commit_timestamp, type, errors } = postgresChanges
+        const enrichedPayload = {
+          schema: schema,
+          table: table,
+          commit_timestamp: commit_timestamp,
+          eventType: type,
+          new: {},
+          old: {},
+          errors: errors,
+        }
+        return {
+          ...enrichedPayload,
+          ...this._getPayloadRecords(postgresChanges),
+        }
+      }
+
+      return payload
     })
   }
 
