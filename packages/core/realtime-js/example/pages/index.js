@@ -54,10 +54,18 @@ export default function IndexPage() {
   useEffect(() => {
     const socket = new RealtimeClient(NEXT_PUBLIC_REALTIME_URL, {
       params: { apikey: NEXT_PUBLIC_SUPABASE_KEY },
+      worker: true,
+      heartbeatIntervalMs: 26000,
+      heartbeatCallback: (status) => {
+        console.log('WORKER HEARTBEAT STATUS:', status)
+      },
       logger: (kind, msg, data) => {
         console.log(`[${kind.toUpperCase()}] ${msg}`, data)
       },
     })
+
+    window.socket = socket
+    window.channels = []
 
     socketRef.current = socket
     supabaseRef.current = createClient(NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_KEY)
@@ -120,17 +128,11 @@ export default function IndexPage() {
   const handleLogout = async () => {
     try {
       await supabaseRef.current.auth.signOut()
+      await socketRef.current.setAuth(NEXT_PUBLIC_SUPABASE_KEY)
       setIsAuthenticated(false)
       setUserId(null)
       setEmail('')
       setPassword('')
-
-      // Unsubscribe from all channels
-      channelsRef.current.forEach((channel) => {
-        channel.unsubscribe()
-      })
-      channelsRef.current.clear()
-      setActiveChannels([])
     } catch (error) {
       console.error('Logout error:', error)
     }
@@ -149,9 +151,7 @@ export default function IndexPage() {
   const createChannel = () => {
     if (!channelName.trim()) return
 
-    const fullChannelName = channelType === 'private' ? `private:${channelName}` : channelName
-
-    if (channelsRef.current.has(fullChannelName)) return
+    if (channelsRef.current.has(channelName)) return
 
     const channelConfig = {
       config: {
@@ -172,7 +172,9 @@ export default function IndexPage() {
       ]
     }
 
-    const channel = socketRef.current.channel(fullChannelName, channelConfig)
+    const channel = socketRef.current.channel(channelName, channelConfig)
+
+    window.channels.push(channel)
 
     // Set up broadcast listener
     if (enableBroadcast) {
@@ -181,7 +183,7 @@ export default function IndexPage() {
           ...prev,
           {
             timestamp: new Date().toISOString(),
-            channel: fullChannelName,
+            channel: channelName,
             event,
             payload,
           },
@@ -195,21 +197,21 @@ export default function IndexPage() {
         const state = channel.presenceState()
         setPresenceState((prev) => ({
           ...prev,
-          [fullChannelName]: state,
+          [channelName]: state,
         }))
       })
 
       channel.on('presence', { event: 'join' }, () => {
         setPresenceState((prev) => ({
           ...prev,
-          [fullChannelName]: channel.presenceState(),
+          [channelName]: channel.presenceState(),
         }))
       })
 
       channel.on('presence', { event: 'leave' }, () => {
         setPresenceState((prev) => ({
           ...prev,
-          [fullChannelName]: channel.presenceState(),
+          [channelName]: channel.presenceState(),
         }))
       })
     }
@@ -224,7 +226,7 @@ export default function IndexPage() {
             ...prev,
             {
               timestamp: new Date().toISOString(),
-              channel: fullChannelName,
+              channel: channelName,
               ...payload,
             },
           ])
@@ -232,7 +234,7 @@ export default function IndexPage() {
       )
     }
 
-    channelsRef.current.set(fullChannelName, channel)
+    channelsRef.current.set(channelName, channel)
     updateActiveChannels()
   }
 

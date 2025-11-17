@@ -754,7 +754,6 @@ export default class RealtimeChannel {
   private _updateFilterMessage() {
     this.phoenixChannel.updateFilterMessage((event, payload: any, messageRef, phoenixBind) => {
       const typeLower = event.toLocaleLowerCase()
-      console.log(this.bindings)
       const bind = this.bindings[typeLower]?.find((bind) => bind.ref === phoenixBind.ref)
 
       if (!bind) {
