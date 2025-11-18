@@ -25,17 +25,17 @@ export default function IndexPage() {
   const channelsRef = useRef(new Map())
   const [activeChannels, setActiveChannels] = useState([])
   const [channelName, setChannelName] = useState('')
-  const [channelType, setChannelType] = useState('public')
+  const [privateChannel, setPrivateChannel] = useState(false)
   const [enablePresence, setEnablePresence] = useState(true)
   const [enableBroadcast, setEnableBroadcast] = useState(true)
   const [broadcastAck, setBroadcastAck] = useState(true)
   const [broadcastSelf, setBroadcastSelf] = useState(true)
-  const [postgresChangesEnabled, setPostgresChangesEnabled] = useState(false)
 
   // Postgres changes state
   const [pgSchema, setPgSchema] = useState('public')
   const [pgTable, setPgTable] = useState('')
   const [pgEvent, setPgEvent] = useState('*')
+  const [pgChannelName, setPgChannelName] = useState('')
 
   // Broadcast message state
   const [broadcastEvent, setBroadcastEvent] = useState('message')
@@ -155,21 +155,10 @@ export default function IndexPage() {
 
     const channelConfig = {
       config: {
-        private: channelType === 'private',
+        private: privateChannel,
         broadcast: enableBroadcast ? { ack: broadcastAck, self: broadcastSelf } : undefined,
         presence: enablePresence ? { key: presenceKey || userId || '' } : undefined,
       },
-    }
-
-    // Add postgres_changes to initial config if enabled
-    if (postgresChangesEnabled && pgTable.trim()) {
-      channelConfig.config.postgres_changes = [
-        {
-          event: pgEvent,
-          schema: pgSchema,
-          table: pgTable,
-        },
-      ]
     }
 
     const channel = socketRef.current.channel(channelName, channelConfig)
@@ -216,24 +205,6 @@ export default function IndexPage() {
       })
     }
 
-    // Set up postgres_changes listener if enabled in initial config
-    if (postgresChangesEnabled && pgTable.trim()) {
-      channel.on(
-        'postgres_changes',
-        { event: pgEvent, schema: pgSchema, table: pgTable },
-        (payload) => {
-          setPostgresChanges((prev) => [
-            ...prev,
-            {
-              timestamp: new Date().toISOString(),
-              channel: channelName,
-              ...payload,
-            },
-          ])
-        }
-      )
-    }
-
     channelsRef.current.set(channelName, channel)
     updateActiveChannels()
   }
@@ -274,18 +245,35 @@ export default function IndexPage() {
   }
 
   const updateActiveChannels = () => {
-    const channels = Array.from(channelsRef.current.entries()).map(([name, channel]) => ({
-      name,
-      status: channel.state(),
-    }))
+    const channels = Array.from(channelsRef.current.entries()).map(([name, channel]) => {
+      // Count bindings by type
+      const bindings = channel.bindings || {}
+      const broadcastCount = Array.isArray(bindings.broadcast) ? bindings.broadcast.length : 0
+      const presenceCount = Array.isArray(bindings.presence) ? bindings.presence.length : 0
+      const postgresCount = Array.isArray(bindings.postgres_changes)
+        ? bindings.postgres_changes.length
+        : 0
+
+      return {
+        name,
+        status: channel.state(),
+        bindings: {
+          broadcast: broadcastCount,
+          presence: presenceCount,
+          postgres_changes: postgresCount,
+        },
+      }
+    })
+
     setActiveChannels(channels)
   }
 
   // Postgres changes
-  const addPostgresChanges = (channelName) => {
-    if (!pgTable.trim()) return
+  const addPostgresChanges = () => {
+    console.log('addPostgresChanges', pgTable, pgChannelName)
+    if (!pgTable.trim() || !pgChannelName.trim()) return
 
-    const channel = channelsRef.current.get(channelName)
+    const channel = channelsRef.current.get(pgChannelName)
     if (!channel) return
 
     const config = {
@@ -299,11 +287,17 @@ export default function IndexPage() {
         ...prev,
         {
           timestamp: new Date().toISOString(),
-          channel: channelName,
+          channel: pgChannelName,
           ...payload,
         },
       ])
     })
+
+    updateActiveChannels()
+    setPgChannelName('')
+    setPgSchema('')
+    setPgTable('')
+    setPgEvent('*')
   }
 
   // Broadcast
@@ -331,9 +325,6 @@ export default function IndexPage() {
       <div className="mx-auto max-w-7xl">
         <div className="mb-6">
           <h1 className="text-2xl font-bold">Realtime-js Interactive Example</h1>
-          <p className="text-gray-600 text-xs mt-1">
-            Test broadcast, presence, postgres_changes (with RLS), and authorization features
-          </p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -341,10 +332,7 @@ export default function IndexPage() {
           <div className="space-y-4">
             {/* Connection Status */}
             <div className="bg-white rounded-lg shadow p-4">
-              <h2 className="font-bold mb-2 text-lg">1. WebSocket Connection</h2>
-              <p className="text-gray-600 text-xs mb-3">
-                Manage the WebSocket connection to the Realtime server
-              </p>
+              <h2 className="font-bold mb-2 text-lg">WebSocket Connection</h2>
               <div className="flex items-center gap-2 mb-3">
                 <div
                   className={`w-3 h-3 rounded-full ${
@@ -369,10 +357,9 @@ export default function IndexPage() {
 
             {/* Authentication */}
             <div className="bg-white rounded-lg shadow p-4">
-              <h2 className="font-bold mb-2 text-lg">2. User Authentication</h2>
+              <h2 className="font-bold mb-2 text-lg">User Authentication</h2>
               <p className="text-gray-600 text-xs mb-3">
-                Login to test RLS policies and authorized channels. Credentials can be set via
-                environment variables.
+                Login to test RLS policies and authorized channels.
               </p>
               {!isAuthenticated ? (
                 <div className="space-y-2">
@@ -402,10 +389,6 @@ export default function IndexPage() {
                   >
                     Log In
                   </button>
-                  <p className="text-xs text-gray-500 mt-2">
-                    Tip: Set NEXT_PUBLIC_TEST_USER_EMAIL and NEXT_PUBLIC_TEST_USER_PASSWORD in
-                    .env.local
-                  </p>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -430,13 +413,10 @@ export default function IndexPage() {
 
             {/* Create Channel */}
             <div className="bg-white rounded-lg shadow p-4">
-              <h2 className="font-bold mb-2 text-lg">3. Create Channel</h2>
-              <p className="text-gray-600 text-xs mb-3">
-                Configure and create a new realtime channel with custom settings
-              </p>
+              <h2 className="font-bold mb-2 text-lg">Create Channel</h2>
               <div className="space-y-3">
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">Channel Name *</label>
+                  <label className="text-xs text-gray-600 block mb-1">Channel Name</label>
                   <input
                     type="text"
                     placeholder="e.g., my-room, game-lobby, chat-1"
@@ -447,20 +427,20 @@ export default function IndexPage() {
                 </div>
 
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">Channel Type</label>
+                  <label className="text-xs text-gray-600 block mb-1">Private?</label>
                   <select
                     className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
-                    value={channelType}
-                    onChange={(e) => setChannelType(e.target.value)}
+                    value={privateChannel}
+                    onChange={(e) => setPrivateChannel(e.target.value)}
                   >
-                    <option value="public">Public (anyone can join)</option>
-                    <option value="private">Private (requires authentication)</option>
+                    <option value={true}>true</option>
+                    <option value={false}>false</option>
                   </select>
                 </div>
 
                 <div className="border-t pt-3">
                   <label className="text-xs text-gray-600 block mb-2 font-semibold">
-                    Feature Configuration
+                    Channel Configuration
                   </label>
 
                   {/* Broadcast */}
@@ -473,7 +453,6 @@ export default function IndexPage() {
                         className="w-4 h-4"
                       />
                       <span className="text-xs font-semibold">Enable Broadcast</span>
-                      <span className="text-xs text-gray-500">(send/receive messages)</span>
                     </label>
                     {enableBroadcast && (
                       <div className="ml-6 space-y-1">
@@ -509,7 +488,6 @@ export default function IndexPage() {
                         className="w-4 h-4"
                       />
                       <span className="text-xs font-semibold">Enable Presence</span>
-                      <span className="text-xs text-gray-500">(track online users)</span>
                     </label>
                     {enablePresence && (
                       <div className="ml-6">
@@ -526,21 +504,9 @@ export default function IndexPage() {
 
                   {/* Postgres Changes */}
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={postgresChangesEnabled}
-                        onChange={(e) => setPostgresChangesEnabled(e.target.checked)}
-                        className="w-4 h-4"
-                      />
-                      <span className="text-xs font-semibold">Enable Postgres Changes</span>
-                      <span className="text-xs text-gray-500">(database events)</span>
-                    </label>
-                    {postgresChangesEnabled && (
-                      <div className="ml-6 space-y-2 text-xs text-gray-600">
-                        <p>Configure below in "Postgres Changes Configuration" section</p>
-                      </div>
-                    )}
+                    <div className="ml-6 space-y-2 text-xs text-gray-600">
+                      <p>Configure below in "Postgres Changes Configuration" section</p>
+                    </div>
                   </div>
                 </div>
 
@@ -553,12 +519,66 @@ export default function IndexPage() {
               </div>
             </div>
 
+            {/* Postgres Changes Config */}
+            <div className="bg-white rounded-lg shadow p-4">
+              <h2 className="font-bold mb-2 text-lg">Postgres Changes Configuration</h2>
+              <div className="space-y-2">
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Channel Name</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
+                    value={pgChannelName}
+                    onChange={(e) => setPgChannelName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Schema</label>
+                  <input
+                    type="text"
+                    placeholder="public"
+                    className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
+                    value={pgSchema}
+                    onChange={(e) => setPgSchema(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Table Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g., messages, users, posts"
+                    className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
+                    value={pgTable}
+                    onChange={(e) => setPgTable(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1">Event Type</label>
+                  <select
+                    className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
+                    value={pgEvent}
+                    onChange={(e) => setPgEvent(e.target.value)}
+                  >
+                    <option value="*">All Events (*)</option>
+                    <option value="INSERT">INSERT only</option>
+                    <option value="UPDATE">UPDATE only</option>
+                    <option value="DELETE">DELETE only</option>
+                  </select>
+                </div>
+              </div>
+              <div className="p-4">
+                <button
+                  className="w-full px-4 py-2 bg-green-500 text-white rounded text-xs hover:bg-green-600 transition-colors"
+                  onClick={() => addPostgresChanges()}
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+
             {/* Active Channels */}
             <div className="bg-white rounded-lg shadow p-4">
-              <h2 className="font-bold mb-2 text-lg">4. Active Channels</h2>
-              <p className="text-gray-600 text-xs mb-3">
-                Manage your subscribed channels and perform actions
-              </p>
+              <h2 className="font-bold mb-2 text-lg">Active Channels</h2>
               {activeChannels.length === 0 ? (
                 <div className="text-center py-6 border border-dashed border-gray-300 rounded">
                   <p className="text-gray-500 text-xs">No channels created yet</p>
@@ -568,7 +588,7 @@ export default function IndexPage() {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {activeChannels.map(({ name, status }) => (
+                  {activeChannels.map(({ name, status, bindings }) => (
                     <div key={name} className="border border-gray-300 rounded p-3 bg-gray-50">
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex-1 min-w-0">
@@ -588,6 +608,14 @@ export default function IndexPage() {
                           {status}
                         </span>
                       </div>
+                      {bindings && (
+                        <div className="mb-2 flex gap-2 text-xs">
+                          <span className="text-gray-600">
+                            Bindings: 📡 {bindings.broadcast} | 👤 {bindings.presence} | 🗄️{' '}
+                            {bindings.postgres_changes}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex gap-1 flex-wrap">
                         {status !== 'joined' && (
                           <button
@@ -613,13 +641,6 @@ export default function IndexPage() {
                               title="Send a broadcast message"
                             >
                               📡 Broadcast
-                            </button>
-                            <button
-                              className="px-2 py-1 bg-pink-500 text-white rounded text-xs hover:bg-pink-600 transition-colors"
-                              onClick={() => addPostgresChanges(name)}
-                              title="Add postgres_changes listener"
-                            >
-                              🗄️ Add PG Listener
                             </button>
                           </>
                         )}
@@ -714,59 +735,6 @@ export default function IndexPage() {
                     value={presencePayload}
                     onChange={(e) => setPresencePayload(e.target.value)}
                   />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Default: {`{"online_at": "<timestamp>"}`}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {/* Postgres Changes Config */}
-            <div className="bg-white rounded-lg shadow p-4">
-              <h2 className="font-bold mb-2 text-lg">7. Postgres Changes Configuration</h2>
-              <p className="text-gray-600 text-xs mb-3">
-                Configure database change listeners for realtime updates (respects RLS policies)
-              </p>
-              <div className="space-y-2">
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Schema</label>
-                  <input
-                    type="text"
-                    placeholder="public"
-                    className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
-                    value={pgSchema}
-                    onChange={(e) => setPgSchema(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Table Name *</label>
-                  <input
-                    type="text"
-                    placeholder="e.g., messages, users, posts"
-                    className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
-                    value={pgTable}
-                    onChange={(e) => setPgTable(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600 block mb-1">Event Type</label>
-                  <select
-                    className="w-full px-3 py-2 border border-gray-300 rounded text-xs"
-                    value={pgEvent}
-                    onChange={(e) => setPgEvent(e.target.value)}
-                  >
-                    <option value="*">All Events (*)</option>
-                    <option value="INSERT">INSERT only</option>
-                    <option value="UPDATE">UPDATE only</option>
-                    <option value="DELETE">DELETE only</option>
-                  </select>
-                </div>
-                <div className="bg-blue-50 border border-blue-200 rounded p-2 mt-2">
-                  <p className="text-xs text-blue-800">
-                    <span className="font-semibold">Note:</span> Postgres changes respect Row Level
-                    Security (RLS) policies. Make sure you're authenticated and have proper
-                    permissions.
-                  </p>
                 </div>
               </div>
             </div>
