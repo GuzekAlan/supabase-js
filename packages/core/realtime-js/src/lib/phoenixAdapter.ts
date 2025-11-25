@@ -63,7 +63,7 @@ export class PhoenixSocket {
   }
 
   disconnect(code: number | undefined, reason: string | undefined): void {
-    this.socket.disconnect(() => {}, code, reason)
+    this.socket.disconnect(() => { }, code, reason)
   }
 
   log(kind: string, msg: string, data?: any): void {
@@ -128,7 +128,9 @@ export class PhoenixChannel {
   }
 
   off(event: string, refNumber?: number): void {
-    this.channel.off(event, refNumber)
+    if (refNumber) {
+      this.channel.off(event, refNumber)
+    }
   }
 
   trigger(type: string, payload: object, ref?: string): void {
