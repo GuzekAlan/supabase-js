@@ -15,6 +15,7 @@ import { Timer } from 'phoenix'
 import { httpEndpointURL } from './lib/transformers'
 import RealtimeChannel from './RealtimeChannel'
 import type { RealtimeChannelOptions } from './RealtimeChannel'
+import Serializer from './lib/serializer'
 
 type Fetch = typeof fetch
 
@@ -114,6 +115,8 @@ export default class RealtimeClient {
   worker?: boolean
   workerUrl?: string
   workerRef?: Worker
+
+  serializer = new Serializer();
 
   private _authPromise: Promise<void> | null = null
 
@@ -585,6 +588,9 @@ export default class RealtimeClient {
     this.worker = options?.worker ?? false
     this.accessToken = options?.accessToken ?? null
     this.heartbeatCallback = options?.heartbeatCallback ?? noop
+
+    this.phoenixSocketOptions.encode = this.serializer.encode.bind(this.serializer);
+    this.phoenixSocketOptions.decode = this.serializer.decode.bind(this.serializer);
 
     // Handle special cases
     if (options?.logLevel || options?.log_level) {
